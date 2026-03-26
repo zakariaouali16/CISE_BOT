@@ -1,0 +1,3 @@
+curl -X POST https://fastapi-chat-bot-620344157943.us-central1.run.app/ \
+     -H "Content-Type: application/json" \
+     -d '{"type": "MESSAGE", "message": {"text": "test"}}'

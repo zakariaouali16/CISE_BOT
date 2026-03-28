@@ -15,11 +15,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # --- GOOGLE CHAT API SETUP FOR DELAYED MESSAGES ---
-# You need a Service Account JSON file from Google Cloud Console to send messages asynchronously.
-# CREDENTIALS_FILE = "path/to/your/service-account.json"
-# scopes = ['https://www.googleapis.com/auth/chat.bot']
-# credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-# chat_service = build('chat', 'v1', credentials=credentials)
+CREDENTIALS_FILE = "credentials.json"
+scopes = ['https://www.googleapis.com/auth/chat.bot']
+credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+chat_service = build('chat', 'v1', credentials=credentials)
 
 async def send_delayed_dm(sender_name: str, delay_seconds: int):
     """Waits for the specified time, then sends a DM via Google Chat API."""
@@ -37,10 +36,10 @@ async def send_delayed_dm(sender_name: str, delay_seconds: int):
     
     try:
         # UNCOMMENT THIS once your credentials are set up:
-        # chat_service.spaces().messages().create(
-        #     parent=sender_name, # Sending directly to the user creates a DM space
-        #     body=message_body
-        # ).execute()
+        chat_service.spaces().messages().create(
+            parent=sender_name,
+            body=message_body
+        ).execute()
         logger.info(f"Successfully sent delayed DM to {sender_name}")
     except Exception as e:
         logger.error(f"Failed to send delayed DM: {e}")

@@ -38,7 +38,22 @@ async def chat_endpoint(request: Request):
             else:
                 text = "Thanks for adding me! I am ready to help you track your work hours."
                 
-            response_data = {"text": text}
+            # WRONG (Standard Chat API format):
+            # response_data = {"text": text} 
+            
+            # RIGHT (Workspace Add-on format):
+            response_data = {
+                "hostAppDataAction": {
+                    "chatDataAction": {
+                        "createMessageAction": {
+                            "message": {
+                                "text": text
+                            }
+                        }
+                    }
+                }
+            }
+            
             logger.info(f"Sending response: {response_data}")
             return response_data
 

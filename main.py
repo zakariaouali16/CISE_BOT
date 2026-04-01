@@ -3,7 +3,7 @@ import uvicorn
 import logging
 import asyncio
 import re
-
+import json, os
 # For sending asynchronous messages later
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -15,36 +15,52 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # --- GOOGLE CHAT API SETUP FOR DELAYED MESSAGES ---
-CREDENTIALS_FILE = "credentials.json"
 scopes = ['https://www.googleapis.com/auth/chat.bot']
-credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+
+# Try to load from an environment variable first (for Cloud Run)
+creds_env = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+
+if creds_env:
+    # Parse the JSON string from the environment variable
+    creds_info = json.loads(creds_env)
+    credentials = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
+else:
+    # Fallback to the file if running locally
+    CREDENTIALS_FILE = "credentials.json"
+    credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+
 chat_service = build('chat', 'v1', credentials=credentials)
 
-async def send_delayed_dm(sender_name: str, delay_seconds: int):
+# --- FIX 1: Add space_name to the function parameters ---
+async def send_delayed_dm(space_name: str, sender_name: str, delay_seconds: int):
     """Waits for the specified time, then sends a DM via Google Chat API."""
-    logger.info(f"Starting {delay_seconds} second timer for {sender_name}...")
+    logger.info(f"Starting {delay_seconds} second timer for {sender_name} in {space_name}...")
     
-    # Wait for the break to finish
+    # Wait for the break to finish (this is async and perfectly safe)
     await asyncio.sleep(delay_seconds)
     
-    logger.info(f"Timer up! Sending message to {sender_name}")
+    logger.info(f"Timer up! Sending message to {space_name}")
     
-    # To DM a user, you send a message to their specific "users/XYZ" ID.
     message_body = {
         "text": f"🔔 Hey <{sender_name}>! Your 10-minute break is up. Time to get back to it!"
     }
     
-    try:
-        # UNCOMMENT THIS once your credentials are set up:
-        chat_service.spaces().messages().create(
-            parent=sender_name,
+    # --- FIX: Wrap the blocking synchronous code in a helper function ---
+    def make_api_call():
+        return chat_service.spaces().messages().create(
+            parent=space_name, 
             body=message_body
         ).execute()
+
+    try:
+        # --- FIX: Run the blocking call in a separate thread ---
+        # This prevents the .execute() method from freezing the Uvicorn worker
+        await asyncio.to_thread(make_api_call)
         logger.info(f"Successfully sent delayed DM to {sender_name}")
     except Exception as e:
         logger.error(f"Failed to send delayed DM: {e}")
 
-
+        
 @app.post("/")
 async def chat_endpoint(request: Request, background_tasks: BackgroundTasks):
     logger.info("--- New POST request received ---")
@@ -59,7 +75,8 @@ async def chat_endpoint(request: Request, background_tasks: BackgroundTasks):
 
         # Extract variables safely
         user_message = ""
-        sender_name = "" # Looks like "users/123456789"
+        sender_name = "" 
+        space_name = ""  # --- FIX 3: Initialize space_name ---
         
         # 1. Handle Google Workspace Add-on Format
         if "chat" in event:
@@ -69,11 +86,19 @@ async def chat_endpoint(request: Request, background_tasks: BackgroundTasks):
                 user_message = msg_payload.get("text", "")
                 sender_name = msg_payload.get("sender", {}).get("name", "")
                 
+                # --- FIX 4: Safely extract space_name from Add-on payload ---
+                space_name = msg_payload.get("space", {}).get("name", "")
+                if not space_name:
+                    space_name = chat_data.get("space", {}).get("name", "")
+                
         # 2. Handle Standard Google Chat Format
         elif event.get("type") == "MESSAGE":
             msg_payload = event.get("message", {})
             user_message = msg_payload.get("text", "")
             sender_name = msg_payload.get("sender", {}).get("name", "")
+            
+            # --- FIX 5: Extract space_name from Standard payload ---
+            space_name = event.get("space", {}).get("name", "")
 
         # --- TIMER LOGIC ---
         if user_message:
@@ -82,9 +107,8 @@ async def chat_endpoint(request: Request, background_tasks: BackgroundTasks):
             # Check if the user said the magic words
             if re.search(r'\b(i 10|taking 10|taking 10 minute break)\b', text_lower):
                 
-                # Add the 10-minute timer to the background (600 seconds)
-                # Setting to 10 seconds right now for easy testing! Change 10 to 600 later.
-                background_tasks.add_task(send_delayed_dm, sender_name, 10)
+                # --- FIX 6: Pass space_name to the background task ---
+                background_tasks.add_task(send_delayed_dm, space_name, sender_name, 10)
                 
                 text = "Got it! Have a good 10-minute break. I'll send you a DM when time is up."
             else:

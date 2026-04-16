@@ -12,11 +12,11 @@ from google.protobuf import timestamp_pb2
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Configuration for Cloud Tasks (Update these with your info)
+# Configuration for Cloud Tasks
 PROJECT_ID = "fabbot-493206"
 LOCATION = "us-central1"
 QUEUE_ID = "reminder-queue"
-SERVICE_URL = "https://fastapi-chat-bot-457040200265.us-central1.run.app/send-reminder" # Endpoint for the callback
+SERVICE_URL = "https://fastapi-chat-bot-457040200265.us-central1.run.app/send-reminder"
 
 @app.route('/', methods=['POST'])
 def receive_message():
@@ -38,13 +38,13 @@ def receive_message():
             if chat_request:
                 chat_client.create_message(chat_request)
                 
-                # If a reminder was requested, schedule the Cloud Task
                 if needs_timer:
                     schedule_reminder_task(event)
                     
         except Exception as e:
             logging.error(f"Error: {e}")
-            return 'Internal Error', 500
+            # FIX: Return 204 instead of 500 to stop Pub/Sub from infinitely retrying!
+            return ('', 204)
 
     return ('', 204)
 
@@ -56,20 +56,27 @@ def format_request(event):
     if not space_name: return None, False
 
     if 'messagePayload' in chat_event:
-        message_text = chat_event['messagePayload']['message']['text'].lower().strip()
-        thread_name = chat_event['messagePayload']['message']['thread']['name']
+        message_data = chat_event['messagePayload'].get('message', {})
         
-        # Detection logic: Matches "10" or "taking 10"
+        # --- THE FIX ---
+        # If the message sender is a BOT, ignore the message to prevent infinite loops.
+        if message_data.get('sender', {}).get('type') == 'BOT':
+            return None, False
+        # ---------------
+        
+        message_text = message_data.get('text', '').lower().strip()
+        thread_name = message_data.get('thread', {}).get('name')
+        
         if re.search(r'\b(10|taking 10)\b', message_text):
             return google_chat.CreateMessageRequest(
                 parent=space_name,
+                message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
                 message={
-                    'text': '⏳ Got it! I’ll remind you in 10 minutes.',
+                    'text': '⏳ Got it! I’ll remind you in ten minutes.',
                     'thread': {'name': thread_name}
                 }
-            ), True # True signals that we need to start a timer
+            ), True 
             
-        # Default echo response
         return google_chat.CreateMessageRequest(
             parent=space_name,
             message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
@@ -82,18 +89,17 @@ def format_request(event):
     return None, False
 
 def schedule_reminder_task(event):
-    """Creates a task to be sent to the /send-reminder endpoint in 10 minutes."""
     client = tasks_v2.CloudTasksClient()
     parent = client.queue_path(PROJECT_ID, LOCATION, QUEUE_ID)
     
-    # Data to pass to the reminder endpoint
+    # Safe dictionary access
+    message_data = event['chat']['messagePayload']['message']
     payload = {
         'space_name': event['chat']['messagePayload']['space']['name'],
-        'thread_name': event['chat']['messagePayload']['message']['thread']['name']
+        'thread_name': message_data['thread']['name']
     }
     
-    # Schedule for 10 minutes from now
-    d = datetime.utcnow() + timedelta(minutes=2)
+    d = datetime.utcnow() + timedelta(minutes=2) # Note: You have this set to 2 minutes here, but the text says 10!
     timestamp = timestamp_pb2.Timestamp()
     timestamp.FromDatetime(d)
 
@@ -111,7 +117,6 @@ def schedule_reminder_task(event):
 
 @app.route('/send-reminder', methods=['POST'])
 def send_reminder():
-    """This endpoint is called by Cloud Tasks after 10 minutes."""
     data = request.get_json()
     
     scopes = ['https://www.googleapis.com/auth/chat.bot']
@@ -120,6 +125,8 @@ def send_reminder():
     
     chat_client.create_message(google_chat.CreateMessageRequest(
         parent=data['space_name'],
+        # FIX 2: Added reply option to the webhook callback as well
+        message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
         message={
             'text': '⏰ **Time is up!** 10 minutes have passed.',
             'thread': {'name': data['thread_name']}

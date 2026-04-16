@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+gunicorn
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-oauthlib
+google-auth-httplib2
+google-cloud-pubsub

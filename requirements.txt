@@ -1,5 +1,3 @@
-fastapi
-uvicorn
-gunicorn
-google-api-python-client
-google-auth
+flask
+google-cloud-pubsub
+google-apps-chat

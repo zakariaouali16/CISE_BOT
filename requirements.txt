@@ -1,3 +1,4 @@
 flask
 google-cloud-pubsub
 google-apps-chat
+google-cloud-tasks

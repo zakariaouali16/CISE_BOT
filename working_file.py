@@ -4,25 +4,19 @@ import logging
 import re
 from datetime import datetime, timedelta
 from flask import Flask, request
-
 from google.apps import chat_v1 as google_chat
 import google.auth
 from google.cloud import tasks_v2
 from google.protobuf import timestamp_pb2
-from googleapiclient.discovery import build
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Configuration for Cloud Tasks & Sheets
+# Configuration for Cloud Tasks
 PROJECT_ID = "fabbot-493206"
 LOCATION = "us-central1"
 QUEUE_ID = "reminder-queue"
 SERVICE_URL = "https://fastapi-chat-bot-457040200265.us-central1.run.app/send-reminder"
-
-# --- GOOGLE SHEETS CONFIGURATION ---
-SPREADSHEET_ID = "1mOIkxD4LmSFM3LCNRCzChqYP6E2BYEwZj-_UjmwGPsg" # Replace with the ID from your Google Sheets URL
-SHEET_RANGE = "'April ''26 Fab Lab Tasks'!A276:I348" # Replace YOUR_SHEET_NAME (e.g., 'Fab Lab Tasks')
 
 @app.route('/', methods=['POST'])
 def receive_message():
@@ -35,12 +29,11 @@ def receive_message():
         event = json.loads(data)
         
         try:
-            # Added sheets.readonly scope
-            scopes = ['https://www.googleapis.com/auth/chat.bot', 'https://www.googleapis.com/auth/spreadsheets.readonly']
+            scopes = ['https://www.googleapis.com/auth/chat.bot']
             credentials, _ = google.auth.default(scopes=scopes)
             chat_client = google_chat.ChatServiceClient(credentials=credentials)
             
-            chat_request, needs_timer = format_request(event, credentials)
+            chat_request, needs_timer = format_request(event)
             
             if chat_request:
                 chat_client.create_message(chat_request)
@@ -50,52 +43,12 @@ def receive_message():
                     
         except Exception as e:
             logging.error(f"Error: {e}")
+            # FIX: Return 204 instead of 500 to stop Pub/Sub from infinitely retrying!
             return ('', 204)
 
     return ('', 204)
 
-def fetch_user_tasks(user_display_name, credentials):
-    """Fetches tasks assigned to the user from rows 276-348 in Google Sheets."""
-    try:
-        service = build('sheets', 'v4', credentials=credentials)
-        sheet = service.spreadsheets()
-        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=SHEET_RANGE).execute()
-        values = result.get('values', [])
-
-        if not values:
-            return "⚠️ No data found in the specified range (Lines 276 to 348)."
-
-        user_tasks = []
-        for row in values:
-            # Ensure the row has enough columns to check 'Tech Assigned' (usually Column B / index 1)
-            if len(row) > 1:
-                tech_assigned = row[1]
-                
-                # Check if the user's chat display name matches the 'Tech Assigned' column
-                if user_display_name.lower() in tech_assigned.lower():
-                    task_name = row[0] if len(row) > 0 else "Unknown Task"
-                    deadline = row[2] if len(row) > 2 else "TBD"
-                    event_name = row[3] if len(row) > 3 else "No Event"
-                    
-                    # Assuming Column 'Completed?' is around index 7 based on the CSV format
-                    # Change this index based on the exact column location in your live sheet
-                    completed = row[7] if len(row) > 7 else "False"
-
-                    # Only show incomplete tasks
-                    if completed.lower() != 'true':
-                        user_tasks.append(f"• *{task_name}*\n  ↳ _Event:_ {event_name} | _Deadline:_ {deadline}")
-
-        if not user_tasks:
-            return f"✅ You have no pending tasks assigned in that range, {user_display_name}!"
-
-        return f"📋 *Here are your assigned tasks:*\n\n" + "\n\n".join(user_tasks)
-
-    except Exception as e:
-        logging.error(f"Error fetching sheets data: {e}")
-        return "❌ Sorry, I encountered an error while fetching your tasks from the spreadsheet."
-
-
-def format_request(event, credentials):
+def format_request(event):
     chat_event = event.get('chat', {})
     payload = chat_event.get('messagePayload') or chat_event.get('addedToSpacePayload')
     space_name = payload.get('space', {}).get('name') if payload else None
@@ -105,36 +58,16 @@ def format_request(event, credentials):
     if 'messagePayload' in chat_event:
         message_data = chat_event['messagePayload'].get('message', {})
         
+        # --- THE FIX ---
         # If the message sender is a BOT, ignore the message to prevent infinite loops.
         if message_data.get('sender', {}).get('type') == 'BOT':
             return None, False
+        # ---------------
         
-        # 'text' contains the full message (e.g. "@BotName here")
         message_text = message_data.get('text', '').lower().strip()
-        
-        # 'argumentText' strips out the @BotName mention (e.g. "here")
-        # We fall back to message_text just in case it's a direct message without a tag
-        argument_text = message_data.get('argumentText', message_text).lower().strip()
-        
         thread_name = message_data.get('thread', {}).get('name')
-        sender_name = message_data.get('sender', {}).get('displayName', '')
-
-        # --- TASK FETCHING LOGIC ---
-        # Now we check argument_text instead of message_text
-        if argument_text == 'here':
-            task_response_text = fetch_user_tasks(sender_name, credentials)
-            return google_chat.CreateMessageRequest(
-                parent=space_name,
-                message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
-                message={
-                    'text': task_response_text,
-                    'thread': {'name': thread_name}
-                }
-            ), False
-
-        # --- TIMER LOGIC ---
-        # We can still use message_text or argument_text here since we are using regex search
-        if re.search(r'\b(10|taking 10)\b', argument_text):
+        
+        if re.search(r'\b(10|taking 10)\b', message_text):
             return google_chat.CreateMessageRequest(
                 parent=space_name,
                 message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
@@ -144,12 +77,11 @@ def format_request(event, credentials):
                 }
             ), True 
             
-        # Fallback response
         return google_chat.CreateMessageRequest(
             parent=space_name,
             message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
             message={
-                'text': f"You said: `{argument_text}`",
+                'text': f"You said: `{message_text}`",
                 'thread': {'name': thread_name}
             }
         ), False
@@ -160,14 +92,14 @@ def schedule_reminder_task(event):
     client = tasks_v2.CloudTasksClient()
     parent = client.queue_path(PROJECT_ID, LOCATION, QUEUE_ID)
     
+    # Safe dictionary access
     message_data = event['chat']['messagePayload']['message']
     payload = {
         'space_name': event['chat']['messagePayload']['space']['name'],
         'thread_name': message_data['thread']['name']
     }
     
-    # 10 minutes delay applied
-    d = datetime.utcnow() + timedelta(minutes=10) 
+    d = datetime.utcnow() + timedelta(minutes=2) # Note: You have this set to 2 minutes here, but the text says 10!
     timestamp = timestamp_pb2.Timestamp()
     timestamp.FromDatetime(d)
 
@@ -193,6 +125,7 @@ def send_reminder():
     
     chat_client.create_message(google_chat.CreateMessageRequest(
         parent=data['space_name'],
+        # FIX 2: Added reply option to the webhook callback as well
         message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
         message={
             'text': '⏰ **Time is up!** 10 minutes have passed.',

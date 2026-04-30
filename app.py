@@ -21,8 +21,8 @@ QUEUE_ID = "reminder-queue"
 SERVICE_URL = "https://fastapi-chat-bot-457040200265.us-central1.run.app/send-reminder"
 
 # --- GOOGLE SHEETS CONFIGURATION ---
-SPREADSHEET_ID = "1mOIkxD4LmSFM3LCNRCzChqYP6E2BYEwZj-_UjmwGPsg" # Replace with the ID from your Google Sheets URL
-SHEET_RANGE = "'April ''26 Fab Lab Tasks'!A276:I348" # Replace YOUR_SHEET_NAME (e.g., 'Fab Lab Tasks')
+SPREADSHEET_ID = "1xCsTyYgWuGUUNS9Ek-VUrfHR1O0Eud2mb_InwIVhAWU" # Replace with the ID from your Google Sheets URL
+SHEET_RANGE = "'April ''26 Fab Lab Tasks'!A404:I470" # Replace YOUR_SHEET_NAME (e.g., 'Fab Lab Tasks')
 
 @app.route('/', methods=['POST'])
 def receive_message():
@@ -40,13 +40,14 @@ def receive_message():
             credentials, _ = google.auth.default(scopes=scopes)
             chat_client = google_chat.ChatServiceClient(credentials=credentials)
             
-            chat_request, needs_timer = format_request(event, credentials)
+            chat_request, needs_timer, minutes = format_request(event, credentials)
             
             if chat_request:
                 chat_client.create_message(chat_request)
                 
                 if needs_timer:
-                    schedule_reminder_task(event)
+                    # Pass the specific minutes to the scheduler
+                    schedule_reminder_task(event, minutes)
                     
         except Exception as e:
             logging.error(f"Error: {e}")
@@ -133,6 +134,16 @@ def format_request(event, credentials):
             ), False
 
         # --- TIMER LOGIC ---
+        # Check for Lunch (30 mins)
+        if 'lunch' in argument_text:
+            return google_chat.CreateMessageRequest(
+                parent=space_name,
+                message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
+                message={
+                    'text': '⏳ Enjoy your lunch! I’ll remind you in 30 minutes.',
+                    'thread': {'name': thread_name}
+                }
+            ), True, 30  # Return 30 minutes
         # We can still use message_text or argument_text here since we are using regex search
         if re.search(r'\b(10|taking 10)\b', argument_text):
             return google_chat.CreateMessageRequest(
@@ -142,7 +153,7 @@ def format_request(event, credentials):
                     'text': '⏳ Got it! I’ll remind you in ten minutes.',
                     'thread': {'name': thread_name}
                 }
-            ), True 
+            ), True, 10  # Return 10 minutes 
             
         # Fallback response
         return google_chat.CreateMessageRequest(
@@ -154,20 +165,21 @@ def format_request(event, credentials):
             }
         ), False
         
-    return None, False
+    return None, False, 0
 
-def schedule_reminder_task(event):
+def schedule_reminder_task(event, minutes):
     client = tasks_v2.CloudTasksClient()
     parent = client.queue_path(PROJECT_ID, LOCATION, QUEUE_ID)
     
     message_data = event['chat']['messagePayload']['message']
     payload = {
         'space_name': event['chat']['messagePayload']['space']['name'],
-        'thread_name': message_data['thread']['name']
+        'thread_name': message_data['thread']['name'],
+        'minutes': minutes # Optional: send to payload if you want the reminder message to be dynamic
     }
     
-    # 10 minutes delay applied
-    d = datetime.utcnow() + timedelta(minutes=10) 
+    # Use the dynamic 'minutes' variable here
+    d = datetime.utcnow() + timedelta(minutes=minutes) 
     timestamp = timestamp_pb2.Timestamp()
     timestamp.FromDatetime(d)
 
@@ -181,11 +193,12 @@ def schedule_reminder_task(event):
         'schedule_time': timestamp
     }
     client.create_task(parent=parent, task=task)
-    logging.info("Reminder task scheduled.")
+    logging.info(f"Reminder task scheduled for {minutes} minutes.")
 
 @app.route('/send-reminder', methods=['POST'])
 def send_reminder():
     data = request.get_json()
+    minutes = data.get('minutes', 10) # Fallback to 10 if not provided
     
     scopes = ['https://www.googleapis.com/auth/chat.bot']
     credentials, _ = google.auth.default(scopes=scopes)
@@ -195,7 +208,7 @@ def send_reminder():
         parent=data['space_name'],
         message_reply_option=google_chat.CreateMessageRequest.MessageReplyOption.REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD,
         message={
-            'text': '⏰ **Time is up!** 10 minutes have passed.',
+            'text': f'⏰ **Time is up!** {minutes} minutes have passed.',
             'thread': {'name': data['thread_name']}
         }
     ))

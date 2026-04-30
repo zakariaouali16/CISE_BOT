@@ -101,27 +101,27 @@ def format_request(event, credentials):
     payload = chat_event.get('messagePayload') or chat_event.get('addedToSpacePayload')
     space_name = payload.get('space', {}).get('name') if payload else None
     
-    if not space_name: return None, False
+    # FIX 1: Added 0
+    if not space_name: return None, False, 0
 
     if 'messagePayload' in chat_event:
         message_data = chat_event['messagePayload'].get('message', {})
         
         # If the message sender is a BOT, ignore the message to prevent infinite loops.
+        # FIX 2: Added 0
         if message_data.get('sender', {}).get('type') == 'BOT':
-            return None, False
+            return None, False, 0
         
         # 'text' contains the full message (e.g. "@BotName here")
         message_text = message_data.get('text', '').lower().strip()
         
         # 'argumentText' strips out the @BotName mention (e.g. "here")
-        # We fall back to message_text just in case it's a direct message without a tag
         argument_text = message_data.get('argumentText', message_text).lower().strip()
         
         thread_name = message_data.get('thread', {}).get('name')
         sender_name = message_data.get('sender', {}).get('displayName', '')
 
         # --- TASK FETCHING LOGIC ---
-        # Now we check argument_text instead of message_text
         if argument_text == 'here':
             task_response_text = fetch_user_tasks(sender_name, credentials)
             return google_chat.CreateMessageRequest(
@@ -131,7 +131,7 @@ def format_request(event, credentials):
                     'text': task_response_text,
                     'thread': {'name': thread_name}
                 }
-            ), False
+            ), False, 0  # <--- FIX 3: Added , 0 here!
 
         # --- TIMER LOGIC ---
         # Check for Lunch (30 mins)
@@ -143,8 +143,8 @@ def format_request(event, credentials):
                     'text': '⏳ Enjoy your lunch! I’ll remind you in 30 minutes.',
                     'thread': {'name': thread_name}
                 }
-            ), True, 30  # Return 30 minutes
-        # We can still use message_text or argument_text here since we are using regex search
+            ), True, 30  
+            
         if re.search(r'\b(10|taking 10)\b', argument_text):
             return google_chat.CreateMessageRequest(
                 parent=space_name,
@@ -153,7 +153,7 @@ def format_request(event, credentials):
                     'text': '⏳ Got it! I’ll remind you in ten minutes.',
                     'thread': {'name': thread_name}
                 }
-            ), True, 10  # Return 10 minutes 
+            ), True, 10  
             
         # Fallback response
         return google_chat.CreateMessageRequest(
@@ -163,7 +163,7 @@ def format_request(event, credentials):
                 'text': f"You said: `{argument_text}`",
                 'thread': {'name': thread_name}
             }
-        ), False
+        ), False, 0  # <--- FIX 4: Added , 0 here!
         
     return None, False, 0
 

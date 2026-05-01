@@ -55,47 +55,103 @@ def receive_message():
 
     return ('', 204)
 
+def is_upcoming_or_no_deadline(deadline_str):
+    """Checks if a deadline string is empty, today, or in the future."""
+    # If there is no deadline, or it says "TBD", include it
+    if not deadline_str or not str(deadline_str).strip() or str(deadline_str).strip().upper() == "TBD":
+        return True
+    
+    # Common date formats used in Google Sheets
+    date_formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%b %d, %Y", "%m-%d-%Y", "%m/%d"]
+    today = datetime.now().date()
+    
+    for fmt in date_formats:
+        try:
+            parsed_date = datetime.strptime(str(deadline_str).strip(), fmt).date()
+            
+            # Handle MM/DD format where the year defaults to 1900
+            if fmt == "%m/%d":
+                parsed_date = parsed_date.replace(year=today.year)
+                
+            return parsed_date >= today
+        except ValueError:
+            continue
+            
+    # If the date can't be parsed (e.g., text like "End of Month" or "Pending"), 
+    # we treat it as having "no strict deadline" and keep it in the list.
+    return True
+
+
 def fetch_user_tasks(user_display_name, credentials):
-    """Fetches tasks assigned to the user from rows 276-348 in Google Sheets."""
+    """Fetches tasks assigned to the user from the entire Google Sheet."""
     try:
         service = build('sheets', 'v4', credentials=credentials)
         sheet = service.spreadsheets()
         result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=SHEET_RANGE).execute()
         values = result.get('values', [])
-
+        
         if not values:
-            return "⚠️ No data found in the specified range (Lines 276 to 348)."
-
+            return "⚠️ No data found in the specified range."
+        
         user_tasks = []
+        today = datetime.now().date()
+        
         for row in values:
-            # Ensure the row has enough columns to check 'Tech Assigned' (usually Column B / index 1)
-            if len(row) > 1:
-                tech_assigned = row[1]
-                
-                # Check if the user's chat display name matches the 'Tech Assigned' column
-                if user_display_name.lower() in tech_assigned.lower():
-                    task_name = row[0] if len(row) > 0 else "Unknown Task"
-                    deadline = row[2] if len(row) > 2 else "TBD"
-                    event_name = row[3] if len(row) > 3 else "No Event"
-                    
-                    # Assuming Column 'Completed?' is around index 7 based on the CSV format
-                    # Change this index based on the exact column location in your live sheet
-                    completed = row[7] if len(row) > 7 else "False"
+            # TODO: Update these indices based on your actual Google Sheet columns
+            assignee = row[1] if len(row) > 1 else ""
+            deadline_str = row[2] if len(row) > 2 else "" 
+            
+            # First, check if the task is actually assigned to the user
+            if user_display_name.lower() not in assignee.lower():
+                continue
 
-                    # Only show incomplete tasks
-                    if completed.lower() != 'true':
-                        user_tasks.append(f"• *{task_name}*\n  ↳ _Event:_ {event_name} | _Deadline:_ {deadline}")
+            # Clean up the string just in case there are accidental spaces
+            clean_date_str = deadline_str.strip()
+            parsed_date = None
+            
+            # Tuple of date formats: 'Apr 14, 2026' and '4/30/2026'
+            date_formats = ('%b %d, %Y', '%m/%d/%Y')
+            
+            for fmt in date_formats:
+                try:
+                    parsed_date = datetime.strptime(clean_date_str, fmt).date()
+                    break # Success! It matched this format, so break out of the loop
+                except ValueError:
+                    continue # It didn't match this format, try the next one
+            
+            # If we successfully extracted a date and it's before today, skip the row
+            if parsed_date and parsed_date < today:
+                continue 
+            
+            # (If parsed_date is still None, it was something like "TBD", so we keep it)
 
+            # If it passed the filters, add it to the list
+            user_tasks.append(row)
+            
+        # --- FORMATTING LOGIC GOES HERE (Inside the try block) ---
         if not user_tasks:
-            return f"✅ You have no pending tasks assigned in that range, {user_display_name}!"
+            return "✅ You have no upcoming tasks!"
 
-        return f"📋 *Here are your assigned tasks:*\n\n" + "\n\n".join(user_tasks)
+        # Recreate the exact formatting from your testing space!
+        response_lines = ["📋 *Here are your assigned upcoming tasks:*"]
+        
+        for task in user_tasks:
+            # Provide safe defaults if the row is missing columns
+            task_name = task[0] if len(task) > 0 else "Unknown Task"
+            # task[1] is the assignee
+            deadline = task[2] if len(task) > 2 else "TBD"
+            event_name = task[3] if len(task) > 3 else "" 
 
+            response_lines.append(f"• *{task_name}*")
+            response_lines.append(f"  ↳ *Event:* {event_name} | *Deadline:* {deadline}")
+
+        # Join the list into a single string with line breaks
+        return "\n".join(response_lines)
+        
     except Exception as e:
-        logging.error(f"Error fetching sheets data: {e}")
-        return "❌ Sorry, I encountered an error while fetching your tasks from the spreadsheet."
-
-
+        logging.error(f"Error fetching tasks: {e}")
+        return "⚠️ An error occurred while fetching your tasks."
+    
 def format_request(event, credentials):
     chat_event = event.get('chat', {})
     payload = chat_event.get('messagePayload') or chat_event.get('addedToSpacePayload')
